@@ -1,0 +1,17 @@
+pytz
+httpx
+mem0ai
+Pillow
+twilio
+alembic
+fastapi
+uvicorn
+pydantic
+pydantic-settings
+requests
+sqlalchemy
+python-dotenv
+openai-whisper
+python-dateutil
+psycopg2-binary
+python-multipart
