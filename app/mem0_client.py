@@ -50,8 +50,16 @@ class Mem0Client:
                 user_id=user_id,
                 output_format="v1.1"
             )
-            logger.info(f"✅ Successfully created Mem0 memory with ID: {memory.get('id', 'unknown') if isinstance(memory, dict) else 'unknown'}")
-            return memory.get('id', str(memory)) if isinstance(memory, dict) else str(memory)
+            
+            # Debug the response type and structure
+            logger.debug(f"🔍 Mem0 response type: {type(memory)}")
+            logger.debug(f"🔍 Mem0 response: {memory}")
+            
+            # Based on the logs, the response is a dict with 'results' array
+            # Extract the latest memory ID from the results
+            memory_id = memory['results'][-1]['id']
+            logger.info(f"✅ Successfully created Mem0 memory with ID: {memory_id}")
+            return memory_id
         except Exception as e:
             logger.error(f"❌ Failed to create memory in Mem0: {str(e)}", exc_info=True)
             raise Exception(f"Failed to create memory in Mem0: {str(e)}")

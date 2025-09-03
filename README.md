@@ -8,6 +8,7 @@ A WhatsApp chatbot using Twilio's WhatsApp API and Mem0's memory layer to ingest
 - **Persistent Memory**: Store entries in Mem0 with metadata and embeddings for fast, semantic retrieval
 - **Database Persistence**: Capture user interactions and memories with idempotent ingestion and media deduplication
 - **Interactive Chat**: Handle conversational queries using context awareness
+- **Semantic Search**: AI-powered intent classification for natural language queries
 - **Memory Listing**: `/list` command to enumerate all user memories
 - **Analytics**: Database-backed queries and analytics summary
 - **Timezone-aware**: Support for timezone-aware queries and filtering
@@ -29,6 +30,25 @@ The application uses a custom database schema with the following entities:
 - **Media Deduplication**: Identical media stored once and re-referenced
 - **Memory Linkage**: Each memory traceable to its originating interaction
 - **Timezone Support**: Queries support user timezone context
+- **AI Intent Classification**: Uses OpenAI to distinguish between new memories and search queries
+
+### Semantic Search
+
+The application uses AI-powered intent classification to automatically determine whether a message is:
+- **New Memory**: Information to be stored (e.g., "I got a haircut today", "Meeting with John at 3pm")
+- **Search Query**: Request for previously stored information (e.g., "What did I plan for dinner?", "Show me my recent photos")
+
+**How it works:**
+1. Every text message is analyzed using OpenAI's GPT-3.5-turbo
+2. The AI classifies the intent with confidence scores
+3. Search queries trigger semantic search in Mem0
+4. New memories are stored for future retrieval
+
+**Example interactions:**
+- User: "I bought groceries: milk, bread, eggs" → Saved as memory
+- User: "What did I buy at the store?" → Searches for grocery-related memories
+- User: "Meeting with Sarah tomorrow" → Saved as memory  
+- User: "When is my meeting with Sarah?" → Searches for meeting-related memories
 
 ## Setup Instructions
 
@@ -113,10 +133,12 @@ The application uses a custom database schema with the following entities:
 
 ### WhatsApp Commands
 
-1. **Send a text message**: Any text message will be saved as a memory
+1. **Send a text message**: 
+   - New memories: "I got a haircut today", "Meeting with John at 3pm"
+   - Search queries: "What did I plan for dinner?", "Show me my recent photos"
 2. **Send an image**: Images are processed and saved with metadata
 3. **Send a voice note**: Audio is transcribed and saved as text memory
-4. **List memories**: Send `/list` to see your recent memories
+4. **List memories**: `/list` - Shows your recent memories
 
 ### API Examples
 

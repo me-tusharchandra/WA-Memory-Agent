@@ -5,6 +5,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 from fastapi import Response, Request
 from fastapi import FastAPI, Depends, HTTPException, Query
+from contextlib import asynccontextmanager
 from twilio.twiml.messaging_response import MessagingResponse
 
 from app.database import get_db, create_tables
@@ -19,10 +20,14 @@ from app.models import (
 )
 from app.config import settings
 from app.media_processor import media_processor
+from app.intent_classifier import IntentClassifier
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+# Initialize intent classifier
+intent_classifier = IntentClassifier()
 
 def _twiml(msg: str) -> str:
     """Helper function to create TwiML response"""
@@ -30,15 +35,10 @@ def _twiml(msg: str) -> str:
     return f"<Response><Message>{safe}</Message></Response>"
 
 
-app = FastAPI(
-    title="WhatsApp Memory Assistant",
-    description="A WhatsApp chatbot using Twilio and Mem0 for memory management",
-    version="1.0.0"
-)
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize database tables on startup"""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan event handler for startup and shutdown"""
+    # Startup
     logger.info("🚀 Starting WhatsApp Memory Assistant...")
     logger.info(f"📊 Database URL: {settings.database_url}")
     logger.info(f"🔧 Debug mode: {settings.debug}")
@@ -52,6 +52,19 @@ async def startup_event():
         raise
     
     logger.info("✅ Application startup complete")
+    
+    yield
+    
+    # Shutdown
+    logger.info("🛑 Shutting down WhatsApp Memory Assistant...")
+
+
+app = FastAPI(
+    title="WhatsApp Memory Assistant",
+    description="A WhatsApp chatbot using Twilio and Mem0 for memory management",
+    version="1.0.0",
+    lifespan=lifespan
+)
 
 
 @app.post("/webhook")
@@ -61,6 +74,13 @@ async def twilio_webhook(
 ):
     """Handle incoming WhatsApp messages from Twilio"""
     logger.info(f"📱 Received webhook from Twilio")
+    logger.info(f"📱 Request URL: {request.url}")
+    logger.info(f"📱 Request method: {request.method}")
+    logger.info(f"📱 User-Agent: {request.headers.get('user-agent', 'Not found')}")
+    logger.info(f"📱 Content-Type: {request.headers.get('content-type', 'Not found')}")
+    
+    # Test immediate response
+    logger.info(f"📱 Webhook processing started")
     
     # Log raw request data for debugging
     form_data = await request.form()
@@ -107,13 +127,34 @@ async def twilio_webhook(
         # Return TwiML response
         response = MessagingResponse()
         response.message(response_message)
-        return Response(content=str(response), media_type="application/xml")
+        twiml_content = str(response)
+        logger.info(f"📤 Final TwiML response: {twiml_content}")
+        logger.info(f"📤 Response status: 200 OK")
+        
+        # Return proper TwiML response for Twilio
+        return Response(
+            content=twiml_content, 
+            media_type="application/xml",
+            headers={
+                "Content-Type": "application/xml"
+            },
+            status_code=200
+        )
         
     except Exception as e:
         logger.error(f"❌ Error processing webhook: {str(e)}", exc_info=True)
         response = MessagingResponse()
         response.message("Sorry, I encountered an error processing your message. Please try again.")
-        return Response(content=str(response), media_type="application/xml")
+        twiml_content = str(response)
+        logger.debug(f"📤 Error TwiML content: {twiml_content}")
+        
+        return Response(
+            content=twiml_content, 
+            media_type="application/xml",
+            headers={
+                "Content-Type": "application/xml"
+            }
+        )
 
 
 async def handle_text_message(db: Session, user, request: TwilioWebhookRequest):
@@ -139,30 +180,60 @@ async def handle_text_message(db: Session, user, request: TwilioWebhookRequest):
             logger.warning(f"⚠️ Unknown command: {request.Body}")
             return "I don't recognize that command. Use /list to see your memories."
     else:
-        # Handle regular text message
-        logger.debug("💾 Creating interaction for text message...")
-        # Create interaction
-        interaction = InteractionService.create_interaction(
-            db=db,
-            user_id=user.id,
-            twilio_message_sid=request.MessageSid,
-            interaction_type="text",
-            content=request.Body
-        )
-        logger.info(f"✅ Created interaction ID: {interaction.id}")
+        # Use intent classification to determine if this is a search query or new memory
+        logger.debug("🤖 Classifying message intent...")
+        intent_result = await intent_classifier.classify_intent(request.Body, user.whatsapp_id)
+        logger.info(f"✅ Intent classified as: {intent_result['intent']} (confidence: {intent_result['confidence']})")
         
-        logger.debug("🧠 Creating memory in Mem0...")
-        # Create memory
-        memory = MemoryService.create_memory(
-            db=db,
-            user_id=user.id,
-            interaction_id=interaction.id,
-            content=request.Body,
-            memory_type="text"
-        )
-        logger.info(f"✅ Created memory ID: {memory.id} (Mem0 ID: {memory.mem0_id})")
-        
-        return "I've saved your text message as a memory! You can ask me about it later."
+        if intent_result['intent'] == 'search':
+            # Handle as search query
+            logger.info("🔍 Processing as search query...")
+            search_query = intent_result.get('extracted_query', request.Body)
+            
+            # Create interaction for the search
+            interaction = InteractionService.create_interaction(
+                db=db,
+                user_id=user.id,
+                twilio_message_sid=request.MessageSid,
+                interaction_type="search",
+                content=request.Body,
+                interaction_metadata={
+                    "intent_classification": intent_result,
+                    "search_query": search_query
+                }
+            )
+            logger.info(f"✅ Created search interaction ID: {interaction.id}")
+            
+            return await handle_search_query(db, user, search_query)
+        else:
+            # Handle as new memory
+            logger.info("💾 Processing as new memory...")
+            
+            # Create interaction
+            interaction = InteractionService.create_interaction(
+                db=db,
+                user_id=user.id,
+                twilio_message_sid=request.MessageSid,
+                interaction_type="text",
+                content=request.Body,
+                interaction_metadata={
+                    "intent_classification": intent_result
+                }
+            )
+            logger.info(f"✅ Created interaction ID: {interaction.id}")
+            
+            logger.debug("🧠 Creating memory in Mem0...")
+            # Create memory
+            memory = MemoryService.create_memory(
+                db=db,
+                user_id=user.id,
+                interaction_id=interaction.id,
+                content=request.Body,
+                memory_type="text"
+            )
+            logger.info(f"✅ Created memory ID: {memory.id} (Mem0 ID: {memory.mem0_id})")
+            
+            return "I've saved your text message as a memory! You can ask me about it later."
 
 
 async def handle_media_message(db: Session, user, request: TwilioWebhookRequest):
@@ -284,6 +355,44 @@ async def handle_list_command(db: Session, user):
     except Exception as e:
         logger.error(f"❌ Error listing memories: {str(e)}", exc_info=True)
         return "Sorry, I couldn't retrieve your memories. Please try again."
+
+
+async def handle_search_query(db: Session, user, query: str):
+    """Handle search queries"""
+    logger.info(f"🔍 Processing search query: '{query}'")
+    
+    try:
+        logger.debug("🔍 Searching memories...")
+        memories = MemoryService.search_memories(db, user.id, query, limit=5)
+        logger.info(f"📊 Found {len(memories)} matching memories")
+        
+        if not memories:
+            logger.info("📭 No matching memories found")
+            return f"I couldn't find any memories matching '{query}'. Try asking about something else or use /list to see all your memories."
+        
+        # Format search results for WhatsApp
+        if len(memories) == 1:
+            memory = memories[0]
+            message = f"Found this memory:\n\n{memory['content'][:300]}..."
+            if len(memory['content']) > 300:
+                message += "\n\n(Message truncated)"
+        else:
+            memory_list = []
+            for i, memory in enumerate(memories[:3], 1):  # Limit to 3 for WhatsApp
+                content_preview = memory['content'][:80] + "..." if len(memory['content']) > 80 else memory['content']
+                memory_list.append(f"{i}. {content_preview}")
+            
+            message = f"Found {len(memories)} memories matching '{query}':\n\n" + "\n".join(memory_list)
+            
+            if len(memories) > 3:
+                message += f"\n\n... and {len(memories) - 3} more results"
+        
+        logger.info(f"📤 Sending search results: {len(memories)} memories")
+        return message
+        
+    except Exception as e:
+        logger.error(f"❌ Error searching memories: {str(e)}", exc_info=True)
+        return "Sorry, I couldn't search your memories right now. Please try again."
 
 
 @app.post("/memories", response_model=MemoryResponse)
@@ -433,3 +542,37 @@ async def root_post():
 async def health_check():
     """Health check endpoint"""
     return {"message": "WhatsApp Memory Assistant API", "status": "running"}
+
+
+@app.get("/test-webhook")
+async def test_webhook():
+    """Test webhook endpoint"""
+    response = MessagingResponse()
+    response.message("Test message from WhatsApp Memory Assistant!")
+    twiml_content = str(response)
+    logger.info(f"📤 Test TwiML content: {twiml_content}")
+    
+    return Response(
+        content=twiml_content, 
+        media_type="application/xml",
+        headers={
+            "Content-Type": "application/xml"
+        }
+    )
+
+
+@app.post("/test-webhook")
+async def test_webhook_post():
+    """Test webhook POST endpoint"""
+    response = MessagingResponse()
+    response.message("Test POST message from WhatsApp Memory Assistant!")
+    twiml_content = str(response)
+    logger.info(f"📤 Test POST TwiML content: {twiml_content}")
+    
+    return Response(
+        content=twiml_content, 
+        media_type="application/xml",
+        headers={
+            "Content-Type": "application/xml"
+        }
+    )
