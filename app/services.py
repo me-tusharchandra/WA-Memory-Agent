@@ -193,7 +193,7 @@ class MemoryService:
         
         # Get user object to get WhatsApp ID
         user = db.query(User).filter(User.id == user_id).first()
-        user_external_id = f"user:wa:{user.whatsapp_id}" if user else f"user:wa:{user_id}"
+        user_external_id = user.whatsapp_id if user else str(user_id)
         
         # Search in Mem0 (with fallback)
         logger.debug("🔍 Searching in Mem0...")
@@ -245,7 +245,7 @@ class MemoryService:
         
         # Get user object to get WhatsApp ID
         user = db.query(User).filter(User.id == user_id).first()
-        user_external_id = f"user:wa:{user.whatsapp_id}" if user else f"user:wa:{user_id}"
+        user_external_id = user.whatsapp_id if user else str(user_id)
         
         # Get memories from Mem0 (with fallback)
         try:

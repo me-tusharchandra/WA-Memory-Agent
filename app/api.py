@@ -1,3 +1,4 @@
+
 import os
 import logging
 import requests
@@ -390,8 +391,11 @@ async def handle_media_message(db: Session, user, request: TwilioWebhookRequest)
         # Determine media type
         if media_content_type.startswith('image/'):
             media_type = "image"
-            # Create a more descriptive content for the image
-            content = f"Image uploaded by user: {request.Body if request.Body else 'No caption'}"
+            # Create content based on user's caption or generate descriptive content
+            if request.Body and request.Body.strip():
+                content = request.Body.strip()  # Store just the user's caption
+            else:
+                content = "Image"  # Simple description for uncaptioned images
             logger.info("🖼️ Processing image...")
         elif media_content_type.startswith('audio/'):
             media_type = "audio"
@@ -566,16 +570,15 @@ async def handle_search_query(db: Session, user, query: str, http_request: Reque
             if created_at:
                 try:
                     from datetime import datetime
-                    import pytz
                     
-                    # Parse the ISO timestamp (assuming it's in UTC)
-                    dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                    # Parse the timestamp (already in local time)
+                    if isinstance(created_at, str):
+                        dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                    else:
+                        dt = created_at
                     
-                    # Convert to local timezone (you can adjust this)
-                    local_tz = pytz.timezone('Asia/Kolkata')  # IST timezone
-                    local_dt = dt.astimezone(local_tz)
-                    
-                    formatted_date = local_dt.strftime('%A, %B %d, %Y at %I:%M %p')
+                    # Format directly without timezone conversion (already local time)
+                    formatted_date = dt.strftime('%A, %B %d, %Y at %I:%M %p')
                     date_info = f"\n📅 Date: {formatted_date}"
                 except Exception as e:
                     logger.error(f"❌ Error formatting date: {e}")
@@ -717,12 +720,21 @@ async def search_memories(
 @app.get("/memories/list", response_model=List[MemoryResponse])
 async def list_memories(
     limit: int = Query(50, description="Maximum number of results"),
+    user_id: Optional[int] = Query(None, description="User ID to list memories for"),
     db: Session = Depends(get_db)
 ):
     """List all memories"""
     try:
-        # For demo purposes, use a default user
-        user = UserService.get_or_create_user(db, "demo_user")
+        if user_id:
+            # Use specific user ID if provided
+            user = db.query(User).filter(User.id == user_id).first()
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+        else:
+            # For demo purposes, use the first user with memories or create demo_user
+            user = db.query(User).first()
+            if not user:
+                user = UserService.get_or_create_user(db, "demo_user")
         
         memories = MemoryService.list_memories(db, user.id, limit)
         return [

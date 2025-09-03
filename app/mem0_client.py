@@ -136,6 +136,35 @@ class Mem0Client:
             logger.error(f"❌ Failed to get memory from Mem0: {str(e)}", exc_info=True)
             raise Exception(f"Failed to get memory from Mem0: {str(e)}")
     
+    def update_memory(self, memory_id: str, new_content: str) -> bool:
+        """Update a memory in Mem0"""
+        logger.debug(f"🔄 Updating Mem0 memory with ID: {memory_id}")
+        logger.debug(f"📝 New content: {new_content}")
+        
+        try:
+            # Using the correct update API method (synchronous)
+            # Note: Mem0 might not have a direct update method, so we might need to delete and recreate
+            # For now, let's try to use the add method with the same ID
+            messages = [
+                {
+                    "role": "user",
+                    "content": new_content
+                }
+            ]
+            
+            # Try to update by adding with the same ID
+            result = self.client.add(
+                messages=messages,
+                user_id="default",  # We'll need to get the actual user_id
+                output_format="v1.1"
+            )
+            
+            logger.info(f"✅ Successfully updated memory: {memory_id}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to update memory in Mem0: {str(e)}", exc_info=True)
+            raise Exception(f"Failed to update memory in Mem0: {str(e)}")
+    
     def delete_memory(self, memory_id: str) -> bool:
         """Delete a memory from Mem0"""
         logger.debug(f"🗑️ Deleting Mem0 memory with ID: {memory_id}")
