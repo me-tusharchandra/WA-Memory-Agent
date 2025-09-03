@@ -141,6 +141,30 @@ class MediaService:
         logger.info(f"✅ Created media ID: {media.id}")
         return media
 
+    @staticmethod
+    def get_existing_transcript(db: Session, content_hash: str) -> Optional[str]:
+        """Get existing transcript for a media file by content hash"""
+        logger.debug(f"🔍 Checking for existing transcript with hash: {content_hash[:16]}...")
+        
+        # Find media by content hash
+        media = db.query(Media).filter(Media.content_hash == content_hash).first()
+        if not media:
+            logger.debug("❌ No existing media found")
+            return None
+        
+        # Find interaction with transcript for this media
+        interaction = db.query(Interaction).filter(
+            Interaction.media_id == media.id,
+            Interaction.transcript.isnot(None)
+        ).first()
+        
+        if interaction and interaction.transcript:
+            logger.info(f"✅ Found existing transcript: {interaction.transcript[:50]}...")
+            return interaction.transcript
+        
+        logger.debug("❌ No existing transcript found")
+        return None
+
 
 class MemoryService:
     @staticmethod
@@ -160,17 +184,53 @@ class MemoryService:
         user = db.query(User).filter(User.id == user_id).first()
         user_external_id = user.whatsapp_id if user else str(user_id)
         
+        # Get interaction metadata from local database
+        interaction = db.query(Interaction).filter(Interaction.id == interaction_id).first()
+        interaction_metadata = interaction.interaction_metadata if interaction else {}
+        
+        # Prepare metadata for Mem0 using local interaction metadata
+        # For image and audio memories, try without metadata to see if that's causing the issue
+        if memory_type in ["image", "audio"]:
+            mem0_metadata = None
+            logger.debug(f"🔍 Trying {memory_type} memory without metadata")
+        else:
+            mem0_metadata = {
+                "user_id": user_id, 
+                "interaction_id": interaction_id,
+                "memory_type": memory_type,
+                "tags": tags or [],
+                **interaction_metadata  # Include all local interaction metadata
+            }
+        
         # Create memory in Mem0
         mem0_id = mem0_client.create_memory(
             content=content,
             memory_type=memory_type,
-            metadata={"user_id": user_id, "interaction_id": interaction_id},
+            metadata=mem0_metadata,
             user_id=user_external_id
         )
         logger.info(f"✅ Created Mem0 memory with ID: {mem0_id}")
         
         logger.debug("💾 Storing memory in local database...")
-        # Store in local database
+        
+        # Check if memory with this mem0_id already exists
+        existing_memory = db.query(Memory).filter(Memory.mem0_id == mem0_id).first()
+        if existing_memory:
+            logger.info(f"✅ Memory with mem0_id {mem0_id} already exists (ID: {existing_memory.id})")
+            logger.info(f"📝 Updating existing memory content from '{existing_memory.content}' to '{content}'")
+            
+            # Update the existing memory with new content and interaction
+            existing_memory.content = content
+            existing_memory.interaction_id = interaction_id
+            existing_memory.memory_type = memory_type
+            existing_memory.tags = tags or []
+            
+            db.commit()
+            db.refresh(existing_memory)
+            logger.info(f"✅ Updated existing memory ID: {existing_memory.id}")
+            return existing_memory
+        
+        # Create new memory
         memory = Memory(
             mem0_id=mem0_id,
             user_id=user_id,
@@ -183,7 +243,7 @@ class MemoryService:
         db.add(memory)
         db.commit()
         db.refresh(memory)
-        logger.info(f"✅ Created local memory ID: {memory.id}")
+        logger.info(f"✅ Created new local memory ID: {memory.id}")
         return memory
     
     @staticmethod
@@ -225,13 +285,29 @@ class MemoryService:
         for result in mem0_results:
             memory = db.query(Memory).filter(Memory.mem0_id == result["id"]).first()
             if memory and memory.user_id == user_id:
+                # Get interaction metadata from local database
+                interaction = db.query(Interaction).filter(Interaction.id == memory.interaction_id).first()
+                interaction_metadata = interaction.interaction_metadata if interaction else {}
+                
+                # Use local interaction metadata if Mem0 metadata is empty
+                metadata = result.get("metadata", {})
+                if not metadata and interaction_metadata:
+                    metadata = {
+                        "user_id": memory.user_id,
+                        "interaction_id": memory.interaction_id,
+                        "memory_type": memory.memory_type,
+                        "tags": memory.tags or [],
+                        **interaction_metadata  # Include all local interaction metadata
+                    }
+                
                 enriched_result = {
                     **result,
                     "local_id": memory.id,
                     "interaction_id": memory.interaction_id,
                     "tags": memory.tags,
                     "created_at": memory.created_at.isoformat(),
-                    "type": memory.memory_type  # Use local database type instead of Mem0 type
+                    "type": memory.memory_type,  # Use local database type instead of Mem0 type
+                    "metadata": metadata  # Use enriched metadata
                 }
                 enriched_results.append(enriched_result)
         
@@ -240,31 +316,23 @@ class MemoryService:
     
     @staticmethod
     def list_memories(db: Session, user_id: int, limit: int = 50) -> List[Dict[str, Any]]:
-        """List all memories for a user"""
+        """List all memories for a user - read from local DB as per task requirements"""
         logger.debug(f"🔍 Listing memories for user {user_id}, limit: {limit}")
         
-        # Get user object to get WhatsApp ID
-        user = db.query(User).filter(User.id == user_id).first()
-        user_external_id = user.whatsapp_id if user else str(user_id)
-        
-        # Get memories from Mem0 (with fallback)
-        try:
-            mem0_memories = mem0_client.list_memories(user_external_id, limit)
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to list Mem0 memories: {e}")
-            logger.info("🔍 Falling back to local memories only...")
-            mem0_memories = []
-        
-        # Get local memories
+        # Get local memories from DB (newest first) - as specified in task requirements
         local_memories = db.query(Memory).filter(
             Memory.user_id == user_id
         ).order_by(Memory.created_at.desc()).limit(limit).all()
         
         logger.info(f"📊 Found {len(local_memories)} local memories")
         
-        # Combine and format results
+        # Format results with metadata from local interactions
         memories = []
         for memory in local_memories:
+            # Get interaction metadata from local database
+            interaction = db.query(Interaction).filter(Interaction.id == memory.interaction_id).first()
+            interaction_metadata = interaction.interaction_metadata if interaction else {}
+            
             memories.append({
                 "id": memory.id,
                 "mem0_id": memory.mem0_id,
@@ -272,7 +340,14 @@ class MemoryService:
                 "type": memory.memory_type,
                 "tags": memory.tags,
                 "created_at": memory.created_at.isoformat(),
-                "interaction_id": memory.interaction_id
+                "interaction_id": memory.interaction_id,
+                "metadata": {
+                    "user_id": memory.user_id,
+                    "interaction_id": memory.interaction_id,
+                    "memory_type": memory.memory_type,
+                    "tags": memory.tags or [],
+                    **interaction_metadata  # Include all local interaction metadata
+                }
             })
         
         return memories
@@ -328,13 +403,15 @@ class ReminderService:
         """Get all pending reminders that are due to be sent"""
         logger.debug(f"🔍 Getting pending reminders, limit: {limit}")
         
-        # Use local machine timezone
+        # Use local machine timezone, but convert to naive datetime for comparison
         now = datetime.now().astimezone()  # Use local timezone for comparison
+        now_naive = now.replace(tzinfo=None)  # Convert to naive datetime for DB comparison
         logger.debug(f"🕐 Current local time: {now}")
+        logger.debug(f"🕐 Current naive time: {now_naive}")
         
         reminders = db.query(Reminder).filter(
             Reminder.status == "pending",
-            Reminder.scheduled_time <= now
+            Reminder.scheduled_time <= now_naive
         ).limit(limit).all()
         
         # Log the scheduled times for debugging

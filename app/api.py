@@ -1,8 +1,8 @@
 
 import os
+import asyncio
 import logging
 import requests
-import asyncio
 
 from typing import List, Optional
 from sqlalchemy.orm import Session
@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, Query
 from twilio.twiml.messaging_response import MessagingResponse
 
-from app.database import get_db, create_tables, Interaction, Media, User, Memory, Reminder
+from app.database import get_db, create_tables, Interaction, Media, User, Memory, Reminder, get_content_hash
 from app.services import (
     UserService, InteractionService, MediaService, 
     MemoryService, AnalyticsService, ReminderService
@@ -388,21 +388,43 @@ async def handle_media_message(db: Session, user, request: TwilioWebhookRequest)
         media_data = await media_processor.download_media(media_url, auth)
         logger.info(f"✅ Downloaded media: {len(media_data)} bytes")
         
-        # Determine media type
+        # Generate content hash for deduplication check
+        content_hash = get_content_hash(media_data)
+        logger.debug(f"🔍 Content hash: {content_hash[:16]}...")
+        
+        # Check for existing media with same hash (deduplication)
+        existing_media = db.query(Media).filter(Media.content_hash == content_hash).first()
+        
+        # Get media metadata early for content generation
+        logger.debug("📊 Getting media metadata...")
+        metadata = await media_processor.get_media_metadata(media_data, media_content_type)
+        logger.debug(f"📊 Metadata: {metadata}")
+        
+        # Determine media type and handle transcription
         if media_content_type.startswith('image/'):
             media_type = "image"
             # Create content based on user's caption or generate descriptive content
             if request.Body and request.Body.strip():
-                content = request.Body.strip()  # Store just the user's caption
+                content = request.Body.strip()  # Just use the user's caption directly
             else:
-                content = "Image"  # Simple description for uncaptioned images
+                # Generate more descriptive content for uncaptioned images
+                content = f"Image file ({media_content_type}) - {metadata.get('width', 'unknown')}x{metadata.get('height', 'unknown')} pixels"
             logger.info("🖼️ Processing image...")
         elif media_content_type.startswith('audio/'):
             media_type = "audio"
             logger.info("🎵 Processing audio...")
-            # Transcribe audio
-            logger.debug("🎤 Transcribing audio with Whisper...")
-            transcript = await media_processor.transcribe_audio(media_data, media_content_type)
+            
+            # Check if we already have a transcript for this audio file
+            existing_transcript = MediaService.get_existing_transcript(db, content_hash)
+            if existing_transcript:
+                logger.info(f"✅ Using existing transcript: {existing_transcript[:50]}...")
+                transcript = existing_transcript
+                content = f"Audio transcript: {transcript}"
+            else:
+                logger.info("🆕 New audio file or no transcript found, transcribing...")
+                transcript = await media_processor.transcribe_audio(media_data, media_content_type)
+                content = f"Audio transcript: {transcript}"
+            
             logger.info(f"✅ Transcription: {transcript}")
             
             # Process transcript through intent classification for temporal references
@@ -421,10 +443,7 @@ async def handle_media_message(db: Session, user, request: TwilioWebhookRequest)
             content = f"Media file: {media_content_type}"
             logger.warning(f"⚠️ Unknown media type: {media_content_type}")
         
-        logger.debug("📊 Getting media metadata...")
-        # Get media metadata
-        metadata = await media_processor.get_media_metadata(media_data, media_content_type)
-        logger.debug(f"📊 Metadata: {metadata}")
+
         
         logger.debug("💾 Creating or getting media entry...")
         # Create or get media entry (deduplication)
@@ -481,22 +500,49 @@ async def handle_list_command(db: Session, user):
     
     try:
         logger.debug("🔍 Retrieving memories from database...")
-        memories = MemoryService.list_memories(db, user.id, limit=10)
+        memories = MemoryService.list_memories(db, user.id, limit=20)  # Increased limit for better overview
         logger.info(f"📊 Found {len(memories)} memories")
         
         if not memories:
             logger.info("📭 No memories found for user")
             return "You don't have any memories yet. Send me text, images, or voice notes to create memories!"
         
-        # Format memories for WhatsApp
+        # Format memories for WhatsApp with more details
         memory_list = []
-        for i, memory in enumerate(memories[:5], 1):  # Limit to 5 for WhatsApp
-            memory_list.append(f"{i}. {memory['content'][:100]}... ({memory['type']})")
+        for i, memory in enumerate(memories[:10], 1):  # Show up to 10 memories
+            # Format date
+            created_at = memory.get('created_at')
+            date_str = ""
+            if created_at:
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                    date_str = f" ({dt.strftime('%b %d, %Y')})"
+                except:
+                    date_str = f" ({created_at[:10]})"
+            
+            # Add type indicator
+            type_indicator = ""
+            if memory.get('type') == 'image':
+                type_indicator = " 📷"
+            elif memory.get('type') == 'audio':
+                type_indicator = " 🎵"
+            elif memory.get('type') == 'text':
+                type_indicator = " 📝"
+            
+            # Truncate content for WhatsApp
+            content = memory['content']
+            if len(content) > 80:
+                content = content[:80] + "..."
+            
+            memory_list.append(f"{i}. {content}{type_indicator}{date_str}")
         
-        message = "Your recent memories:\n" + "\n".join(memory_list)
+        message = f"Your memories ({len(memories)} total):\n\n" + "\n".join(memory_list)
         
-        if len(memories) > 5:
-            message += f"\n\n... and {len(memories) - 5} more memories"
+        if len(memories) > 10:
+            message += f"\n\n... and {len(memories) - 10} more memories"
+        
+        message += "\n\n💡 Use natural language to search specific memories!"
         
         logger.info(f"📤 Sending memory list: {len(memories)} memories")
         return message
@@ -755,24 +801,36 @@ async def list_memories(
 
 
 @app.get("/interactions/recent", response_model=List[InteractionResponse])
-async def get_recent_interactions(
-    limit: int = Query(10, description="Maximum number of results"),
+async def recent_interactions(
+    limit: int = Query(10, ge=1, le=100, description="Maximum number of results"),
+    user_id: int = Query(..., description="User ID to get interactions for"),
     db: Session = Depends(get_db)
 ):
-    """Get recent interactions"""
+    """Get recent interactions for a specific user"""
     try:
-        # For demo purposes, use a default user
-        user = UserService.get_or_create_user(db, "demo_user")
+        # Verify user exists
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
         
-        interactions = InteractionService.get_recent_interactions(db, user.id, limit)
+        # Get recent interactions directly from database
+        interactions = (
+            db.query(Interaction)
+            .filter(Interaction.user_id == user_id)
+            .order_by(Interaction.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+        
+        # Convert to response format
         return [
             InteractionResponse(
-                id=interaction["id"],
-                type=interaction["type"],
-                content=interaction["content"],
-                transcript=interaction["transcript"],
-                created_at=interaction["created_at"],
-                metadata=interaction["metadata"]
+                id=interaction.id,
+                type=interaction.interaction_type,
+                content=interaction.content,
+                transcript=interaction.transcript,
+                created_at=interaction.created_at.isoformat(),
+                metadata=interaction.interaction_metadata or {}
             )
             for interaction in interactions
         ]

@@ -64,6 +64,9 @@ IMPORTANT RULES:
 - When the user says "at 3pm", use 3pm in their local timezone today (or tomorrow if it's already past 3pm)
 - ALWAYS calculate relative times (like "in 2 minutes", "in 1 hour") from the current time shown above
 - NEVER use hardcoded times - always calculate from the current time
+- CRITICAL: "tomorrow" means the day AFTER the current date shown above
+- CRITICAL: "today" means the current date shown above
+- CRITICAL: "yesterday" means the day BEFORE the current date shown above
 
 Respond with JSON format:
 {{
@@ -80,13 +83,13 @@ Respond with JSON format:
 }}
 
 EXAMPLES:
-- "I got a haircut today" → {{"intent": "memory", "confidence": 0.95, "reasoning": "Recent personal update", "extracted_query": "", "updated_content": "I got a haircut on September 3, 2025"}}
-- "Meeting with John tomorrow" → {{"intent": "memory", "confidence": 0.95, "reasoning": "Future event", "extracted_query": "", "updated_content": "Meeting with John on September 4, 2025"}}
+- "I got a haircut today" → {{"intent": "memory", "confidence": 0.95, "reasoning": "Recent personal update", "extracted_query": "", "updated_content": "I got a haircut on September 4, 2025"}}
+- "Meeting with John tomorrow" → {{"intent": "memory", "confidence": 0.95, "reasoning": "Future event", "extracted_query": "", "updated_content": "Meeting with John on September 5, 2025"}}
 - "What did I do yesterday?" → {{"intent": "search", "confidence": 0.9, "reasoning": "Question about past events", "extracted_query": "yesterday activities"}}
-- "Remind me to call mom tomorrow at 3pm" → {{"intent": "reminder", "confidence": 0.95, "reasoning": "Request for future reminder", "extracted_query": "", "updated_content": "", "reminder_info": {{"message": "Call mom", "scheduled_time": "2025-09-04 15:00:00", "timezone": "LOCAL"}}}}
-- "Set a reminder for my meeting at 2pm" → {{"intent": "reminder", "confidence": 0.95, "reasoning": "Request for reminder today", "extracted_query": "", "updated_content": "", "reminder_info": {{"message": "Meeting", "scheduled_time": "2025-09-03 14:00:00", "timezone": "LOCAL"}}}}
-- "Remind me to buy groceries in 2 hours" → {{"intent": "reminder", "confidence": 0.95, "reasoning": "Request for reminder in 2 hours", "extracted_query": "", "updated_content": "", "reminder_info": {{"message": "Buy groceries", "scheduled_time": "2025-09-03 23:25:00", "timezone": "LOCAL"}}}}
-- "Remind me to call varsha in 2 minutes" → {{"intent": "reminder", "confidence": 0.95, "reasoning": "Request for reminder in 2 minutes", "extracted_query": "", "updated_content": "", "reminder_info": {{"message": "Call varsha", "scheduled_time": "2025-09-03 21:27:00", "timezone": "LOCAL"}}}}
+- "Remind me to call mom tomorrow at 3pm" → {{"intent": "reminder", "confidence": 0.95, "reasoning": "Request for future reminder", "extracted_query": "", "updated_content": "", "reminder_info": {{"message": "Call mom", "scheduled_time": "2025-09-05 15:00:00", "timezone": "LOCAL"}}}}
+- "Set a reminder for my meeting at 2pm" → {{"intent": "reminder", "confidence": 0.95, "reasoning": "Request for reminder today", "extracted_query": "", "updated_content": "", "reminder_info": {{"message": "Meeting", "scheduled_time": "2025-09-04 14:00:00", "timezone": "LOCAL"}}}}
+- "Remind me to buy groceries in 2 hours" → {{"intent": "reminder", "confidence": 0.95, "reasoning": "Request for reminder in 2 hours", "extracted_query": "", "updated_content": "", "reminder_info": {{"message": "Buy groceries", "scheduled_time": "2025-09-04 02:46:00", "timezone": "LOCAL"}}}}
+- "Remind me to call varsha in 2 minutes" → {{"intent": "reminder", "confidence": 0.95, "reasoning": "Request for reminder in 2 minutes", "extracted_query": "", "updated_content": "", "reminder_info": {{"message": "Call varsha", "scheduled_time": "2025-09-04 00:48:00", "timezone": "LOCAL"}}}}
 - "Talk to mom after 2 minutes" → {{"intent": "memory", "confidence": 0.95, "reasoning": "Future event without reminder keyword", "extracted_query": "", "updated_content": "Talk to mom after 2 minutes"}}
 - "Call mom in 1 hour" → {{"intent": "memory", "confidence": 0.95, "reasoning": "Future event without reminder keyword", "extracted_query": "", "updated_content": "Call mom in 1 hour"}}"""
 

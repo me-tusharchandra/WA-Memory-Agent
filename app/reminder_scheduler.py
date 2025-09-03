@@ -1,10 +1,10 @@
-import asyncio
 import logging
+import asyncio
 import requests
-from datetime import datetime
 from typing import Optional
-from sqlalchemy.orm import Session
+from datetime import datetime
 from app.config import settings
+from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.services import ReminderService
 
@@ -69,9 +69,8 @@ class ReminderScheduler:
         
         try:
             # Get user's WhatsApp ID
-            user = db.query(reminder.user.__class__).filter(
-                reminder.user.__class__.id == reminder.user_id
-            ).first()
+            from app.database import User
+            user = db.query(User).filter(User.id == reminder.user_id).first()
             
             if not user:
                 logger.error(f"❌ User not found for reminder {reminder.id}")
@@ -127,9 +126,8 @@ class ReminderScheduler:
         db = SessionLocal()
         try:
             # Get user's WhatsApp ID
-            user = db.query(reminder.user.__class__).filter(
-                reminder.user.__class__.id == user_id
-            ).first()
+            from app.database import User
+            user = db.query(User).filter(User.id == user_id).first()
             
             if not user:
                 logger.error(f"❌ User not found for user_id {user_id}")

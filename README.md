@@ -13,6 +13,7 @@ A WhatsApp chatbot using Twilio's WhatsApp API and Mem0's memory layer to ingest
 - **Scheduled Reminders**: Set reminders with natural language time expressions
 - **Analytics**: Database-backed queries and analytics summary
 - **Timezone-aware**: Support for timezone-aware queries and filtering
+- **Robust Error Handling**: Graceful handling of API failures with fallback mechanisms
 
 ## Architecture
 
@@ -34,6 +35,7 @@ The application uses a custom database schema with the following entities:
 - **Timezone Support**: Queries support user timezone context
 - **AI Intent Classification**: Uses OpenAI to distinguish between new memories, search queries, and reminder requests
 - **Scheduled Reminders**: Background scheduler sends reminders at specified times
+- **Mem0 Integration**: Optimized for different memory types (text, image, audio)
 
 ### Semantic Search & Intent Classification
 
@@ -115,6 +117,15 @@ The application includes a sophisticated reminder system that:
    
    # OpenAI Configuration (for Whisper transcription and intent classification)
    OPENAI_API_KEY=your_openai_api_key
+   
+   # Database Configuration
+   DATABASE_URL=sqlite:///./whatsapp_memory.db
+   
+   # Application Configuration
+   SECRET_KEY=your-secret-key-change-this
+   DEBUG=true
+   HOST=0.0.0.0
+   PORT=8000
    ```
 
 4. **Run the application**
@@ -143,8 +154,8 @@ The application includes a sophisticated reminder system that:
 
 ### Memory Management
 - `POST /memories` - Create a new memory
-- `GET /memories?query=<text>` - Search memories
-- `GET /memories/list` - List all memories
+- `GET /memories?query=<text>` - Search memories (uses Mem0 + local DB)
+- `GET /memories/list` - List all memories (from local DB)
 
 ### Reminder Management
 - `POST /reminders` - Create a new reminder
@@ -152,12 +163,14 @@ The application includes a sophisticated reminder system that:
 - `DELETE /reminders/{reminder_id}` - Cancel a reminder
 - `POST /reminders/{reminder_id}/send-now` - Send reminder immediately (for testing)
 
-### Analytics
-- `GET /interactions/recent?limit=<n>` - Get recent interactions
-- `GET /analytics/summary` - Get analytics summary
+### Analytics & Interactions
+- `GET /interactions/recent?user_id=<id>&limit=<n>` - Get recent interactions (from local DB)
+- `GET /analytics/summary?user_id=<id>` - Get analytics summary (from local DB)
+- `GET /users/list` - List all users with memory/interaction counts
 
 ### Health Check
-- `GET /` - Health check endpoint
+- `GET /health` - Health check endpoint
+- `GET /` - Root endpoint for Twilio validation
 
 ## Usage Examples
 
@@ -167,9 +180,9 @@ The application includes a sophisticated reminder system that:
    - New memories: "I got a haircut today", "Meeting with John at 3pm"
    - Search queries: "What did I plan for dinner?", "Show me my recent photos"
    - Reminder requests: "Remind me to call mom tomorrow at 3pm"
-2. **Send an image**: Images are processed and saved with metadata
-3. **Send a voice note**: Audio is transcribed and saved as text memory
-4. **List memories**: `/list` - Shows your recent memories
+2. **Send an image**: Images are processed and saved with user captions
+3. **Send a voice note**: Audio is transcribed using Whisper and saved as text memory
+4. **List memories**: `/list` - Shows your recent memories with type indicators
 
 ### API Examples
 
@@ -202,13 +215,38 @@ curl -X POST "http://localhost:8000/reminders" \
 
 **Get recent interactions:**
 ```bash
-curl "http://localhost:8000/interactions/recent?limit=10"
+curl "http://localhost:8000/interactions/recent?user_id=1&limit=10"
 ```
 
 **Get analytics summary:**
 ```bash
-curl "http://localhost:8000/analytics/summary"
+curl "http://localhost:8000/analytics/summary?user_id=1"
 ```
+
+**List all users:**
+```bash
+curl "http://localhost:8000/users/list"
+```
+
+## Recent Improvements
+
+### Mem0 Integration Fixes
+- **Optimized memory creation** for different content types (text, image, audio)
+- **Removed problematic metadata** for image and audio memories to ensure successful Mem0 storage
+- **Enhanced error handling** with better logging and fallback mechanisms
+- **Content validation** to prevent sending empty or too-short content to Mem0
+
+### Database Improvements
+- **Better user management** with automatic user detection
+- **Enhanced analytics** with memory and interaction counts per user
+- **Improved deduplication** for media files and interactions
+- **Memory update support** for existing memories with new content
+
+### API Enhancements
+- **User-friendly endpoints** that work with or without user_id parameters
+- **Better error messages** for debugging and troubleshooting
+- **Enhanced logging** for monitoring and debugging
+- **Improved response formats** with consistent JSON structures
 
 ## Database Schema Details
 
@@ -226,7 +264,7 @@ curl "http://localhost:8000/analytics/summary"
 - `content`: Message content
 - `media_id`: Foreign key to media (if applicable)
 - `transcript`: Audio transcript (for voice notes)
-- `metadata`: JSON metadata
+- `interaction_metadata`: JSON metadata
 - `created_at`: Interaction timestamp
 
 ### Media Table
@@ -236,12 +274,12 @@ curl "http://localhost:8000/analytics/summary"
 - `file_path`: Local file path
 - `file_size`: File size in bytes
 - `mime_type`: MIME type
-- `metadata`: JSON metadata
+- `media_metadata`: JSON metadata
 - `created_at`: Media creation timestamp
 
 ### Memories Table
 - `id`: Primary key
-- `mem0_id`: Mem0 memory ID
+- `mem0_id`: Mem0 memory ID (unique constraint)
 - `user_id`: Foreign key to users
 - `interaction_id`: Foreign key to interactions
 - `content`: Memory content
@@ -343,6 +381,7 @@ CMD ["python", "main.py"]
 2. **Mem0 API errors**
    - Verify `MEM0_API_KEY` is correct
    - Check Mem0 service status
+   - For image/audio memories, ensure metadata is not being sent (handled automatically)
 
 3. **Audio transcription fails**
    - Ensure `OPENAI_API_KEY` is set
@@ -356,15 +395,17 @@ CMD ["python", "main.py"]
 5. **Database errors**
    - Verify database URL is correct
    - Check database permissions
+   - Ensure database tables are created
 
-## Contributing
+6. **Empty analytics/interactions**
+   - Check if you're using the correct user_id in API calls
+   - Use `/users/list` to see available users and their data counts
+   - Verify the user has actual data in the database
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
+### Debugging Tips
 
-## License
-
-This project is licensed under the MIT License.
+- Check application logs for detailed error messages
+- Use `/users/list` endpoint to verify user IDs and data counts
+- Test individual API endpoints to isolate issues
+- Monitor Mem0 API responses for memory creation issues
+- Check database directly for data consistency

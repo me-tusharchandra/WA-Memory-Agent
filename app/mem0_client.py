@@ -13,6 +13,11 @@ class Mem0Client:
         logger.info("🔧 Initializing Mem0 client...")
         logger.debug(f"🔑 Using Mem0 API key: {settings.mem0_api_key[:8]}...")
         
+        # Check if API key is valid
+        if not settings.mem0_api_key or len(settings.mem0_api_key) < 10:
+            logger.error("❌ Invalid Mem0 API key provided")
+            raise Exception("Invalid Mem0 API key")
+        
         # Initialize with API key only (org_id and project_id are optional)
         self.client = MemoryClient(api_key=settings.mem0_api_key)
         
@@ -35,8 +40,18 @@ class Mem0Client:
         logger.debug(f"📝 Content preview: {content[:100]}...")
         logger.debug(f"📊 Metadata: {metadata}")
         
+                # Validate content
+        if not content or len(content.strip()) < 3:
+            logger.error(f"❌ Content too short or empty: '{content}'")
+            raise Exception("Content too short or empty for memory creation")
+        
+        # For image memories, try to make the content more substantial
+        if memory_type == "image" and len(content.strip()) < 20:
+            # Add more context for short image descriptions
+            content = f"User shared an image with the description: {content}"
+            logger.debug(f"🔍 Enhanced image content: '{content}'")
+        
         try:
-            # Convert content to messages format expected by Mem0 API
             messages = [
                 {
                     "role": "user",
@@ -49,6 +64,11 @@ class Mem0Client:
             logger.debug(f"🔍 Sending to Mem0 - metadata: {metadata}")
             
             # Using the correct API method with messages parameter (synchronous)
+            logger.debug(f"🔍 Calling Mem0 API with messages: {messages}")
+            logger.debug(f"🔍 Calling Mem0 API with user_id: {user_id}")
+            logger.debug(f"🔍 Calling Mem0 API with output_format: v1.1")
+            
+            # Try without metadata first to see if that's causing the issue
             memory = self.client.add(
                 messages=messages,
                 user_id=user_id,
@@ -70,7 +90,10 @@ class Mem0Client:
                     else:
                         # Empty results array - memory creation failed
                         logger.error(f"❌ Mem0 returned empty results array: {memory}")
-                        raise Exception("Mem0 memory creation failed - empty results")
+                        logger.error(f"❌ This usually means the content was too short or not meaningful enough")
+                        logger.error(f"❌ Content sent: '{content}'")
+                        
+                        raise Exception("Mem0 memory creation failed - empty results (content may be too short)")
                 elif 'id' in memory:
                     # Direct ID format
                     logger.info(f"✅ Successfully created Mem0 memory with ID: {memory['id']}")
