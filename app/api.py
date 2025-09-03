@@ -5,9 +5,9 @@ import requests
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from fastapi import Response, Request
-from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
+from fastapi import FastAPI, Depends, HTTPException, Query
 from twilio.twiml.messaging_response import MessagingResponse
 
 from app.database import get_db, create_tables, Interaction, Media, User, Memory
@@ -256,17 +256,26 @@ async def handle_text_message(db: Session, user, request: TwilioWebhookRequest, 
             logger.info(f"✅ Created interaction ID: {interaction.id}")
             
             logger.debug("🧠 Creating memory in Mem0...")
+            
+            # Use the updated content from intent classification (already processed with exact date if needed)
+            enhanced_content = intent_result.get('updated_content', request.Body)
+            logger.info(f"📅 Using content: {enhanced_content}")
+            
             # Create memory
             memory = MemoryService.create_memory(
                 db=db,
                 user_id=user.id,
                 interaction_id=interaction.id,
-                content=request.Body,
+                content=enhanced_content,
                 memory_type="text"
             )
             logger.info(f"✅ Created memory ID: {memory.id} (Mem0 ID: {memory.mem0_id})")
             
-            return "I've saved your text message as a memory! You can ask me about it later."
+            # Provide feedback based on whether content was updated
+            if enhanced_content != request.Body:
+                return f"I've saved your memory: {enhanced_content}"
+            else:
+                return "I've saved your text message as a memory! You can ask me about it later."
 
 
 async def handle_media_message(db: Session, user, request: TwilioWebhookRequest):
@@ -449,7 +458,30 @@ async def handle_search_query(db: Session, user, query: str, http_request: Reque
         # Format search results for WhatsApp
         if len(memories) == 1:
             memory = memories[0]
-            message = f"Found this memory:\n\n{memory['content'][:300]}..."
+            
+            # Format the date/time information
+            created_at = memory.get('created_at')
+            if created_at:
+                try:
+                    from datetime import datetime
+                    import pytz
+                    
+                    # Parse the ISO timestamp (assuming it's in UTC)
+                    dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                    
+                    # Convert to local timezone (you can adjust this)
+                    local_tz = pytz.timezone('Asia/Kolkata')  # IST timezone
+                    local_dt = dt.astimezone(local_tz)
+                    
+                    formatted_date = local_dt.strftime('%A, %B %d, %Y at %I:%M %p')
+                    date_info = f"\n📅 Date: {formatted_date}"
+                except Exception as e:
+                    logger.error(f"❌ Error formatting date: {e}")
+                    date_info = f"\n📅 Date: {created_at}"
+            else:
+                date_info = ""
+            
+            message = f"Found this memory:\n\n{memory['content'][:300]}...{date_info}"
             if len(memory['content']) > 300:
                 message += "\n\n(Message truncated)"
             
@@ -470,7 +502,30 @@ async def handle_search_query(db: Session, user, query: str, http_request: Reque
             for i, memory in enumerate(memories[:3], 1):  # Limit to 3 for WhatsApp
                 content_preview = memory['content'][:80] + "..." if len(memory['content']) > 80 else memory['content']
                 memory_type_indicator = " 📷" if memory.get('type') == 'image' else ""
-                memory_list.append(f"{i}. {content_preview}{memory_type_indicator}")
+                
+                # Add date information
+                created_at = memory.get('created_at')
+                if created_at:
+                    try:
+                        from datetime import datetime
+                        import pytz
+                        
+                        # Parse the ISO timestamp (assuming it's in UTC)
+                        dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                        
+                        # Convert to local timezone
+                        local_tz = pytz.timezone('Asia/Kolkata')  # IST timezone
+                        local_dt = dt.astimezone(local_tz)
+                        
+                        formatted_date = local_dt.strftime('%B %d, %Y')
+                        date_info = f" ({formatted_date})"
+                    except Exception as e:
+                        logger.error(f"❌ Error formatting date: {e}")
+                        date_info = f" ({created_at[:10]})"  # Just the date part
+                else:
+                    date_info = ""
+                
+                memory_list.append(f"{i}. {content_preview}{memory_type_indicator}{date_info}")
                 
                 # Collect image memories for media response
                 if memory.get('type') == 'image' and memory.get('image_url'):
