@@ -44,6 +44,10 @@ class Mem0Client:
                 }
             ]
             
+            logger.debug(f"🔍 Sending to Mem0 - content: '{content}'")
+            logger.debug(f"🔍 Sending to Mem0 - user_id: '{user_id}'")
+            logger.debug(f"🔍 Sending to Mem0 - metadata: {metadata}")
+            
             # Using the correct API method with messages parameter (synchronous)
             memory = self.client.add(
                 messages=messages,
@@ -55,11 +59,30 @@ class Mem0Client:
             logger.debug(f"🔍 Mem0 response type: {type(memory)}")
             logger.debug(f"🔍 Mem0 response: {memory}")
             
-            # Based on the logs, the response is a dict with 'results' array
-            # Extract the latest memory ID from the results
-            memory_id = memory['results'][-1]['id']
-            logger.info(f"✅ Successfully created Mem0 memory with ID: {memory_id}")
-            return memory_id
+            # Handle different response formats
+            if isinstance(memory, dict):
+                if 'results' in memory:
+                    if len(memory['results']) > 0:
+                        # Extract the latest memory ID from the results
+                        memory_id = memory['results'][-1]['id']
+                        logger.info(f"✅ Successfully created Mem0 memory with ID: {memory_id}")
+                        return memory_id
+                    else:
+                        # Empty results array - memory creation failed
+                        logger.error(f"❌ Mem0 returned empty results array: {memory}")
+                        raise Exception("Mem0 memory creation failed - empty results")
+                elif 'id' in memory:
+                    # Direct ID format
+                    logger.info(f"✅ Successfully created Mem0 memory with ID: {memory['id']}")
+                    return memory['id']
+                else:
+                    # Unknown format
+                    logger.error(f"❌ Unknown Mem0 response format: {memory}")
+                    raise Exception(f"Unknown Mem0 response format: {memory}")
+            else:
+                # Non-dict response
+                logger.info(f"✅ Successfully created Mem0 memory with ID: {str(memory)}")
+                return str(memory)
         except Exception as e:
             logger.error(f"❌ Failed to create memory in Mem0: {str(e)}", exc_info=True)
             raise Exception(f"Failed to create memory in Mem0: {str(e)}")

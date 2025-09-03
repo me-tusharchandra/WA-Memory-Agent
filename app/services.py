@@ -131,7 +131,7 @@ class MediaService:
             file_path=file_path,
             file_size=len(content),
             mime_type=mime_type,
-            media_metadata=metadata or {}
+            media_metadata=media_metadata or {}
         )
         
         db.add(media)
@@ -210,7 +210,8 @@ class MemoryService:
                     "local_id": memory.id,
                     "interaction_id": memory.interaction_id,
                     "tags": memory.tags,
-                    "created_at": memory.created_at.isoformat()
+                    "created_at": memory.created_at.isoformat(),
+                    "type": memory.memory_type  # Use local database type instead of Mem0 type
                 }
                 enriched_results.append(enriched_result)
         

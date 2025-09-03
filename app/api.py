@@ -1,3 +1,4 @@
+import os
 import logging
 import requests
 
@@ -5,10 +6,11 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 from fastapi import Response, Request
 from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 from twilio.twiml.messaging_response import MessagingResponse
 
-from app.database import get_db, create_tables
+from app.database import get_db, create_tables, Interaction, Media
 from app.services import (
     UserService, InteractionService, MediaService, 
     MemoryService, AnalyticsService
@@ -78,6 +80,7 @@ async def twilio_webhook(
     logger.info(f"📱 Request method: {request.method}")
     logger.info(f"📱 User-Agent: {request.headers.get('user-agent', 'Not found')}")
     logger.info(f"📱 Content-Type: {request.headers.get('content-type', 'Not found')}")
+    logger.info(f"📱 X-Twilio-Signature: {request.headers.get('x-twilio-signature', 'Not found')}")
     
     # Test immediate response
     logger.info(f"📱 Webhook processing started")
@@ -111,35 +114,65 @@ async def twilio_webhook(
         # Handle different message types
         if webhook_data.NumMedia and int(webhook_data.NumMedia) > 0:
             logger.info("📷 Processing media message...")
+            logger.info(f"📷 Media URL: {webhook_data.MediaUrl0}")
+            logger.info(f"📷 Media Content Type: {webhook_data.MediaContentType0}")
+            logger.info(f"📷 Message Body: {webhook_data.Body}")
             response_message = await handle_media_message(db, user, webhook_data)
         elif webhook_data.Body and webhook_data.Body.strip().lower() == '/list':
             logger.info("📋 Processing list command...")
             response_message = await handle_list_command(db, user)
         elif webhook_data.Body:
             logger.info("💬 Processing text message...")
-            response_message = await handle_text_message(db, user, webhook_data)
+            response_message = await handle_text_message(db, user, webhook_data, request)
         else:
             logger.warning("⚠️ Received message with no body or media")
             response_message = "I received your message but couldn't process it. Please send text, images, or voice notes."
         
-        logger.info(f"📤 Sending response: {response_message[:100]}...")
+        # Log response message (handle both string and dict responses)
+        if isinstance(response_message, dict):
+            logger.info(f"📤 Sending response with {len(response_message.get('image_memories', []))} images: {response_message.get('message', '')[:100]}...")
+        else:
+            logger.info(f"📤 Sending response: {response_message[:100]}...")
         
         # Return TwiML response
         response = MessagingResponse()
-        response.message(response_message)
+        
+        # Check if response_message is a dict with image memories
+        if isinstance(response_message, dict) and "image_memories" in response_message:
+            # Send text message first
+            response.message(response_message["message"])
+            
+            # Send images as media messages
+            for image_memory in response_message["image_memories"]:
+                if image_memory.get("image_url"):
+                    # Convert relative URL to absolute URL for Twilio
+                    # Use the request's host to construct the full URL
+                    request_host = request.headers.get("host", "localhost:8000")
+                    protocol = "https" if "ngrok" in request_host else "http"
+                    image_url = f"{protocol}://{request_host}{image_memory['image_url']}"
+                    response.message("").media(image_url)
+        else:
+            # Regular text response
+            response.message(response_message)
+        
         twiml_content = str(response)
         logger.info(f"📤 Final TwiML response: {twiml_content}")
         logger.info(f"📤 Response status: 200 OK")
         
-        # Return proper TwiML response for Twilio
-        return Response(
+        # Return proper TwiML response for Twilio with explicit headers
+        response_obj = Response(
             content=twiml_content, 
             media_type="application/xml",
             headers={
-                "Content-Type": "application/xml"
+                "Content-Type": "application/xml",
+                "Cache-Control": "no-cache",
+                "Access-Control-Allow-Origin": "*"
             },
             status_code=200
         )
+        
+        logger.info(f"📤 Response object created successfully")
+        return response_obj
         
     except Exception as e:
         logger.error(f"❌ Error processing webhook: {str(e)}", exc_info=True)
@@ -157,7 +190,7 @@ async def twilio_webhook(
         )
 
 
-async def handle_text_message(db: Session, user, request: TwilioWebhookRequest):
+async def handle_text_message(db: Session, user, request: TwilioWebhookRequest, http_request: Request):
     """Handle text messages"""
     logger.debug(f"📝 Processing text message: {request.Body}")
     
@@ -204,7 +237,7 @@ async def handle_text_message(db: Session, user, request: TwilioWebhookRequest):
             )
             logger.info(f"✅ Created search interaction ID: {interaction.id}")
             
-            return await handle_search_query(db, user, search_query)
+            return await handle_search_query(db, user, search_query, http_request)
         else:
             # Handle as new memory
             logger.info("💾 Processing as new memory...")
@@ -260,7 +293,8 @@ async def handle_media_message(db: Session, user, request: TwilioWebhookRequest)
         # Determine media type
         if media_content_type.startswith('image/'):
             media_type = "image"
-            content = f"Image: {media_content_type}"
+            # Create a more descriptive content for the image
+            content = f"Image uploaded by user: {request.Body if request.Body else 'No caption'}"
             logger.info("🖼️ Processing image...")
         elif media_content_type.startswith('audio/'):
             media_type = "audio"
@@ -357,14 +391,56 @@ async def handle_list_command(db: Session, user):
         return "Sorry, I couldn't retrieve your memories. Please try again."
 
 
-async def handle_search_query(db: Session, user, query: str):
-    """Handle search queries"""
+async def handle_search_query(db: Session, user, query: str, http_request: Request):
+    """Handle search queries with image support"""
     logger.info(f"🔍 Processing search query: '{query}'")
     
     try:
         logger.debug("🔍 Searching memories...")
         memories = MemoryService.search_memories(db, user.id, query, limit=5)
         logger.info(f"📊 Found {len(memories)} matching memories")
+        
+        # Debug: Log the structure of first few memories
+        for i, memory in enumerate(memories[:3]):
+            logger.debug(f"🔍 Memory {i+1} structure: {memory}")
+        
+        # Enhance memories with image URLs if they're images
+        enhanced_memories = []
+        logger.debug(f"🔍 Processing {len(memories)} memories for image enhancement")
+        
+        for i, memory in enumerate(memories):
+            logger.debug(f"🔍 Memory {i+1}: type={memory.get('type')}, interaction_id={memory.get('interaction_id')}")
+            
+            if memory.get('type') == 'image':
+                logger.debug(f"🖼️ Found image memory, interaction_id: {memory.get('interaction_id')}")
+                
+                # Get image file path from interaction
+                interaction = db.query(Interaction).filter(
+                    Interaction.id == memory.get('interaction_id')
+                ).first()
+                
+                if interaction:
+                    logger.debug(f"✅ Found interaction, media_id: {interaction.media_id}")
+                    
+                    if interaction.media_id:
+                        media = db.query(Media).filter(Media.id == interaction.media_id).first()
+                        if media:
+                            # Add image URL to memory
+                            file_extension = media.mime_type.split('/')[-1]
+                            memory['image_url'] = f"/media/{media.content_hash}.{file_extension}"
+                            logger.info(f"🖼️ Added image URL: {memory['image_url']}")
+                        else:
+                            logger.warning(f"⚠️ Media not found for media_id: {interaction.media_id}")
+                    else:
+                        logger.warning(f"⚠️ Interaction has no media_id: {interaction.id}")
+                else:
+                    logger.warning(f"⚠️ Interaction not found for id: {memory.get('interaction_id')}")
+            else:
+                logger.debug(f"📝 Non-image memory: {memory.get('type')}")
+            
+            enhanced_memories.append(memory)
+        
+        memories = enhanced_memories
         
         if not memories:
             logger.info("📭 No matching memories found")
@@ -376,16 +452,33 @@ async def handle_search_query(db: Session, user, query: str):
             message = f"Found this memory:\n\n{memory['content'][:300]}..."
             if len(memory['content']) > 300:
                 message += "\n\n(Message truncated)"
+            
+            # Add image info if it's an image
+            if memory.get('type') == 'image' and memory.get('image_url'):
+                message += f"\n\n📷 Image available at: {memory['image_url']}"
         else:
             memory_list = []
+            image_memories = []
+            
             for i, memory in enumerate(memories[:3], 1):  # Limit to 3 for WhatsApp
                 content_preview = memory['content'][:80] + "..." if len(memory['content']) > 80 else memory['content']
-                memory_list.append(f"{i}. {content_preview}")
+                memory_type_indicator = " 📷" if memory.get('type') == 'image' else ""
+                memory_list.append(f"{i}. {content_preview}{memory_type_indicator}")
+                
+                # Collect image memories for media response
+                if memory.get('type') == 'image' and memory.get('image_url'):
+                    image_memories.append(memory)
             
             message = f"Found {len(memories)} memories matching '{query}':\n\n" + "\n".join(memory_list)
             
             if len(memories) > 3:
                 message += f"\n\n... and {len(memories) - 3} more results"
+            
+            # Return both message and image memories for media response
+            return {
+                "message": message,
+                "image_memories": image_memories
+            }
         
         logger.info(f"📤 Sending search results: {len(memories)} memories")
         return message
@@ -542,6 +635,16 @@ async def root_post():
 async def health_check():
     """Health check endpoint"""
     return {"message": "WhatsApp Memory Assistant API", "status": "running"}
+
+
+@app.get("/media/{filename}")
+async def serve_media(filename: str):
+    """Serve media files"""
+    media_path = f"media/{filename}"
+    if os.path.exists(media_path):
+        return FileResponse(media_path)
+    else:
+        raise HTTPException(status_code=404, detail="Media not found")
 
 
 @app.get("/test-webhook")
