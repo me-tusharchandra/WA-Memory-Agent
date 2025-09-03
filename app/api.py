@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 from twilio.twiml.messaging_response import MessagingResponse
 
-from app.database import get_db, create_tables, Interaction, Media
+from app.database import get_db, create_tables, Interaction, Media, User, Memory
 from app.services import (
     UserService, InteractionService, MediaService, 
     MemoryService, AnalyticsService
@@ -453,9 +453,16 @@ async def handle_search_query(db: Session, user, query: str, http_request: Reque
             if len(memory['content']) > 300:
                 message += "\n\n(Message truncated)"
             
-            # Add image info if it's an image
+            # Check if it's an image memory
             if memory.get('type') == 'image' and memory.get('image_url'):
-                message += f"\n\n📷 Image available at: {memory['image_url']}"
+                # Return dictionary format for image memories (single or multiple)
+                return {
+                    "message": message,
+                    "image_memories": [memory]
+                }
+            else:
+                # Return simple string for non-image memories
+                return message
         else:
             memory_list = []
             image_memories = []
@@ -679,3 +686,69 @@ async def test_webhook_post():
             "Content-Type": "application/xml"
         }
     )
+
+
+@app.get("/test/reset-all-data")
+async def reset_all_data(db: Session = Depends(get_db)):
+    """PRIVATE TESTING ENDPOINT: Delete all data from database and Mem0"""
+    logger.warning("🧨 RESET ALL DATA ENDPOINT CALLED - DELETING ALL DATA")
+    
+    try:
+        # Delete all data from local database
+        logger.info("🗑️ Deleting all data from local database...")
+        
+        # Delete in correct order to respect foreign key constraints
+        db.query(Memory).delete()
+        db.query(Interaction).delete()
+        db.query(Media).delete()
+        db.query(User).delete()
+        
+        db.commit()
+        logger.info("✅ All local database data deleted")
+        
+        # Delete all data from Mem0
+        logger.info("🗑️ Deleting all data from Mem0...")
+        
+        # Get all users from Mem0 and delete their memories
+        # Note: This is a simplified approach - in production you'd want more granular control
+        try:
+            # Delete memories for all users (this is a test endpoint)
+            # You might need to adjust this based on your Mem0 API capabilities
+            logger.info("⚠️ Mem0 deletion not implemented - please manually clear Mem0 data")
+            logger.info("💡 You can use Mem0's web interface or API to clear data")
+        except Exception as e:
+            logger.error(f"❌ Error deleting Mem0 data: {e}")
+        
+        # Delete media files from filesystem
+        logger.info("🗑️ Deleting media files...")
+        media_dir = "media"
+        if os.path.exists(media_dir):
+            for filename in os.listdir(media_dir):
+                file_path = os.path.join(media_dir, filename)
+                try:
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
+                        logger.debug(f"🗑️ Deleted file: {filename}")
+                except Exception as e:
+                    logger.error(f"❌ Error deleting file {filename}: {e}")
+            logger.info("✅ Media files deleted")
+        else:
+            logger.info("ℹ️ Media directory doesn't exist")
+        
+        return {
+            "status": "success",
+            "message": "All data has been reset",
+            "details": {
+                "database": "cleared",
+                "mem0": "manual_clear_required",
+                "media_files": "deleted"
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error resetting data: {e}", exc_info=True)
+        db.rollback()
+        return {
+            "status": "error",
+            "message": f"Error resetting data: {str(e)}"
+        }

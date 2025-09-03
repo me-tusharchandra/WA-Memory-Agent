@@ -89,5 +89,3 @@ Additionally, design and implement your own database schema to persist interacti
 - [OpenAI CLIP](https://github.com/openai/CLIP)
 - [OpenAI Whisper](https://github.com/openai/whisper)
 
-
-
