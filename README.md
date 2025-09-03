@@ -17,6 +17,12 @@ A WhatsApp chatbot using Twilio's WhatsApp API and Mem0's memory layer to ingest
 
 ## Architecture
 
+### System Overview
+
+The application follows a modular architecture with clear separation of concerns:
+
+![Architecture Diagram](misc/old-uml-class-diag.png)
+
 ### Database Schema
 
 The application uses a custom database schema with the following entities:
@@ -36,6 +42,46 @@ The application uses a custom database schema with the following entities:
 - **AI Intent Classification**: Uses OpenAI to distinguish between new memories, search queries, and reminder requests
 - **Scheduled Reminders**: Background scheduler sends reminders at specified times
 - **Mem0 Integration**: Optimized for different memory types (text, image, audio)
+
+### Technical Implementation Details
+
+#### Idempotency & Deduplication Strategy
+
+**Message Idempotency:**
+- Uses Twilio's unique `MessageSid` as the deduplication key
+- Before creating any interaction, checks if `MessageSid` already exists in database
+- If duplicate message received, returns existing interaction without creating duplicates
+- Ensures safe retry mechanisms and webhook reliability
+
+**Media Deduplication:**
+- Generates SHA256 content hash for all media files
+- Stores media files with hash-based filenames: `{content_hash}.{extension}`
+- Identical media files are reused, not duplicated
+- Multiple interactions can reference the same media file
+- Saves storage space and processing time
+
+**Memory Deduplication:**
+- Uses Mem0's returned memory ID as unique constraint
+- If Mem0 returns existing memory ID, updates local record instead of creating duplicate
+- Handles cases where Mem0 updates existing memories rather than creating new ones
+
+#### Timezone Handling
+
+**Local Timezone Processing:**
+- All datetime operations use local machine timezone (`datetime.now().astimezone()`)
+- Reminder scheduling calculates times in user's local timezone, not UTC
+- Intent classification includes current local time context for accurate temporal references
+- Natural language time expressions ("tomorrow", "in 2 hours") calculated from current local time
+
+**Database Storage:**
+- All timestamps stored with timezone information (`DateTime(timezone=True)`)
+- Queries support timezone-aware filtering and sorting
+- Analytics and reporting respect local timezone context
+
+**Reminder Scheduling:**
+- Converts local time expressions to exact timestamps using current local time
+- Background scheduler runs in local timezone for accurate reminder delivery
+- Handles edge cases like "tomorrow at 3pm" when it's already past 3pm today
 
 ### Semantic Search & Intent Classification
 
