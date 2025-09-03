@@ -1,6 +1,7 @@
 import os
 import logging
 import requests
+import asyncio
 
 from typing import List, Optional
 from sqlalchemy.orm import Session
@@ -10,19 +11,20 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, Query
 from twilio.twiml.messaging_response import MessagingResponse
 
-from app.database import get_db, create_tables, Interaction, Media, User, Memory
+from app.database import get_db, create_tables, Interaction, Media, User, Memory, Reminder
 from app.services import (
     UserService, InteractionService, MediaService, 
-    MemoryService, AnalyticsService
+    MemoryService, AnalyticsService, ReminderService
 )
 from app.models import (
     MemoryCreate, MemoryResponse, MemorySearchResponse,
     InteractionResponse, AnalyticsSummary, TwilioWebhookRequest,
-    WhatsAppResponse
+    WhatsAppResponse, ReminderCreate, ReminderResponse
 )
 from app.config import settings
 from app.media_processor import media_processor
 from app.intent_classifier import IntentClassifier
+from app.reminder_scheduler import reminder_scheduler
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -53,12 +55,28 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ Failed to create database tables: {e}")
         raise
     
+    # Start reminder scheduler
+    try:
+        logger.info("⏰ Starting reminder scheduler...")
+        asyncio.create_task(reminder_scheduler.start())
+        logger.info("✅ Reminder scheduler started successfully")
+    except Exception as e:
+        logger.error(f"❌ Failed to start reminder scheduler: {e}")
+        # Don't raise here, as the app can still work without reminders
+    
     logger.info("✅ Application startup complete")
     
     yield
     
     # Shutdown
     logger.info("🛑 Shutting down WhatsApp Memory Assistant...")
+    
+    # Stop reminder scheduler
+    try:
+        reminder_scheduler.stop()
+        logger.info("✅ Reminder scheduler stopped")
+    except Exception as e:
+        logger.error(f"❌ Error stopping reminder scheduler: {e}")
 
 
 app = FastAPI(
@@ -238,6 +256,24 @@ async def handle_text_message(db: Session, user, request: TwilioWebhookRequest, 
             logger.info(f"✅ Created search interaction ID: {interaction.id}")
             
             return await handle_search_query(db, user, search_query, http_request)
+        elif intent_result['intent'] == 'reminder':
+            # Handle as reminder request
+            logger.info("⏰ Processing as reminder request...")
+            
+            # Create interaction for the reminder
+            interaction = InteractionService.create_interaction(
+                db=db,
+                user_id=user.id,
+                twilio_message_sid=request.MessageSid,
+                interaction_type="reminder",
+                content=request.Body,
+                interaction_metadata={
+                    "intent_classification": intent_result
+                }
+            )
+            logger.info(f"✅ Created reminder interaction ID: {interaction.id}")
+            
+            return await handle_reminder_request(db, user, intent_result, interaction.id)
         else:
             # Handle as new memory
             logger.info("💾 Processing as new memory...")
@@ -278,11 +314,63 @@ async def handle_text_message(db: Session, user, request: TwilioWebhookRequest, 
                 return "I've saved your text message as a memory! You can ask me about it later."
 
 
+async def handle_reminder_request(db: Session, user, intent_result: dict, interaction_id: int):
+    """Handle reminder creation requests"""
+    logger.info("⏰ Processing reminder request...")
+    
+    try:
+        reminder_info = intent_result.get('reminder_info', {})
+        
+        if not reminder_info:
+            logger.warning("⚠️ No reminder info found in intent result")
+            return "I understand you want a reminder, but I need to know when you'd like to be reminded. Please try again with a specific time, like 'Remind me to call mom tomorrow at 3pm' or 'Set a reminder for my meeting at 2pm'."
+        
+        message = reminder_info.get('message', '')
+        scheduled_time_str = reminder_info.get('scheduled_time', '')
+        timezone = reminder_info.get('timezone', 'LOCAL')
+        
+        if not message or not scheduled_time_str:
+            logger.warning("⚠️ Missing message or scheduled time in reminder info")
+            return "I couldn't understand your reminder request. Please try again with a specific time, like 'Remind me to call mom tomorrow at 3pm' or 'Set a reminder for my meeting at 2pm'."
+        
+        # Parse scheduled time
+        try:
+            from datetime import datetime
+            scheduled_time = datetime.fromisoformat(scheduled_time_str.replace('Z', '+00:00'))
+        except Exception as e:
+            logger.error(f"❌ Error parsing scheduled time: {e}")
+            return "I couldn't understand the time format. Please try again with a specific time, like 'Remind me to call mom tomorrow at 3pm' or 'Set a reminder for my meeting at 2pm'."
+        
+        # Create reminder
+        reminder = ReminderService.create_reminder(
+            db=db,
+            user_id=user.id,
+            interaction_id=interaction_id,
+            message=message,
+            scheduled_time=scheduled_time,
+            user_timezone=timezone
+        )
+        
+        logger.info(f"✅ Created reminder ID: {reminder.id}")
+        
+        # Format the scheduled time for user-friendly display
+        formatted_time = scheduled_time.strftime('%A, %B %d, %Y at %I:%M %p')
+        
+        return f"⏰ I've set a reminder for you!\n\n📝 Message: {message}\n🕐 Time: {formatted_time}\n\nYou'll receive a WhatsApp message at that time."
+        
+    except Exception as e:
+        logger.error(f"❌ Error creating reminder: {e}", exc_info=True)
+        return "Sorry, I couldn't set your reminder. Please try again with a specific time, like 'Remind me to call mom tomorrow at 3pm' or 'Set a reminder for my meeting at 2pm'."
+
+
 async def handle_media_message(db: Session, user, request: TwilioWebhookRequest):
     """Handle media messages (images, audio)"""
     logger.info(f"📷 Processing media message...")
     logger.debug(f"Media URL: {request.MediaUrl0}")
     logger.debug(f"Media Content Type: {request.MediaContentType0}")
+    
+    # Initialize intent_result for audio processing
+    intent_result = None
     
     try:
         # Process first media file (support for multiple media files can be added)
@@ -311,8 +399,19 @@ async def handle_media_message(db: Session, user, request: TwilioWebhookRequest)
             # Transcribe audio
             logger.debug("🎤 Transcribing audio with Whisper...")
             transcript = await media_processor.transcribe_audio(media_data, media_content_type)
-            content = f"Audio transcript: {transcript}"
             logger.info(f"✅ Transcription: {transcript}")
+            
+            # Process transcript through intent classification for temporal references
+            logger.debug("🤖 Classifying audio transcript intent...")
+            intent_result = await intent_classifier.classify_intent(transcript, user.whatsapp_id)
+            logger.info(f"✅ Audio intent classified as: {intent_result['intent']} (confidence: {intent_result['confidence']})")
+            
+            # Use updated content if available, otherwise use original transcript
+            if intent_result.get('updated_content'):
+                content = f"Audio transcript: {intent_result['updated_content']}"
+                logger.info(f"📅 Updated audio content: {intent_result['updated_content']}")
+            else:
+                content = f"Audio transcript: {transcript}"
         else:
             media_type = "other"
             content = f"Media file: {media_content_type}"
@@ -360,7 +459,10 @@ async def handle_media_message(db: Session, user, request: TwilioWebhookRequest)
         
         response_message = f"I've saved your {media_type} as a memory!"
         if media_type == "audio" and transcript:
-            response_message += f" I transcribed it as: '{transcript}'"
+            if intent_result.get('updated_content'):
+                response_message += f" I transcribed it as: '{intent_result['updated_content']}'"
+            else:
+                response_message += f" I transcribed it as: '{transcript}'"
         
         return response_message
         
@@ -668,15 +770,42 @@ async def get_recent_interactions(
 
 
 @app.get("/analytics/summary", response_model=AnalyticsSummary)
-async def get_analytics_summary(db: Session = Depends(get_db)):
+async def get_analytics_summary(db: Session = Depends(get_db), user_id: Optional[int] = None):
     """Get analytics summary"""
     try:
-        # For demo purposes, use a default user
-        user = UserService.get_or_create_user(db, "demo_user")
+        if user_id:
+            # Use specific user ID if provided
+            user = db.query(User).filter(User.id == user_id).first()
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+        else:
+            # For demo purposes, get the first user or create demo_user
+            user = db.query(User).first()
+            if not user:
+                user = UserService.get_or_create_user(db, "demo_user")
         
         analytics = AnalyticsService.get_analytics_summary(db, user.id)
         return AnalyticsSummary(**analytics)
         
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/users/list")
+async def list_users(db: Session = Depends(get_db)):
+    """List all users for debugging"""
+    try:
+        users = db.query(User).all()
+        return {
+            "users": [
+                {
+                    "id": user.id,
+                    "whatsapp_id": user.whatsapp_id,
+                    "created_at": user.created_at.isoformat()
+                }
+                for user in users
+            ]
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -754,6 +883,7 @@ async def reset_all_data(db: Session = Depends(get_db)):
         
         # Delete in correct order to respect foreign key constraints
         db.query(Memory).delete()
+        db.query(Reminder).delete()
         db.query(Interaction).delete()
         db.query(Media).delete()
         db.query(User).delete()
@@ -795,6 +925,11 @@ async def reset_all_data(db: Session = Depends(get_db)):
             "message": "All data has been reset",
             "details": {
                 "database": "cleared",
+                "memories": "deleted",
+                "reminders": "deleted",
+                "interactions": "deleted",
+                "media": "deleted",
+                "users": "deleted",
                 "mem0": "manual_clear_required",
                 "media_files": "deleted"
             }

@@ -26,6 +26,7 @@ class User(Base):
     # Relationships
     interactions = relationship("Interaction", back_populates="user")
     memories = relationship("Memory", back_populates="user")
+    reminders = relationship("Reminder", back_populates="user")
 
 
 class Media(Base):
@@ -78,6 +79,26 @@ class Memory(Base):
     # Relationships
     user = relationship("User", back_populates="memories")
     interaction = relationship("Interaction", back_populates="memories")
+
+
+class Reminder(Base):
+    __tablename__ = "reminders"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    interaction_id = Column(Integer, ForeignKey("interactions.id"), nullable=False)
+    message = Column(Text, nullable=False)
+    scheduled_time = Column(DateTime(timezone=True), nullable=False, index=True)
+    timezone = Column(String, default="UTC")
+    status = Column(String, default="pending")  # pending, sent, cancelled
+    reminder_type = Column(String, default="message")  # message, recurring
+    recurrence_pattern = Column(JSON)  # For recurring reminders
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    sent_at = Column(DateTime(timezone=True))
+    
+    # Relationships
+    user = relationship("User", back_populates="reminders")
+    interaction = relationship("Interaction")
 
 
 def get_db():

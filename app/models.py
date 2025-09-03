@@ -46,6 +46,29 @@ class AnalyticsSummary(BaseModel):
     top_tags: Dict[str, int]
     total_memories: int
     total_interactions: int
+    total_reminders: int
+    pending_reminders: int
+
+
+class ReminderCreate(BaseModel):
+    message: str = Field(..., description="Reminder message")
+    scheduled_time: datetime = Field(..., description="When to send the reminder")
+    timezone: str = Field(default="UTC", description="Timezone for the reminder")
+    reminder_type: str = Field(default="message", description="Type of reminder")
+    recurrence_pattern: Optional[Dict[str, Any]] = Field(default=None, description="Recurrence pattern for recurring reminders")
+
+
+class ReminderResponse(BaseModel):
+    id: int
+    message: str
+    scheduled_time: str
+    timezone: str
+    status: str
+    reminder_type: str
+    created_at: str
+    sent_at: Optional[str]
+    user_id: int
+    interaction_id: int
 
 
 class TwilioWebhookRequest(BaseModel):

@@ -2,13 +2,14 @@ import os
 import pytz
 import logging
 
+from sqlalchemy import func
 from app.config import settings
 from sqlalchemy.orm import Session
 from app.mem0_client import mem0_client
-from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from app.media_processor import media_processor
-from app.database import User, Media, Interaction, Memory, get_content_hash, ensure_media_directory
+from datetime import datetime, timedelta, timezone
+from app.database import User, Media, Interaction, Memory, Reminder, get_content_hash, ensure_media_directory
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -157,7 +158,7 @@ class MemoryService:
         
         # Get user object to get WhatsApp ID
         user = db.query(User).filter(User.id == user_id).first()
-        user_external_id = f"user:wa:{user.whatsapp_id}" if user else f"user:wa:{user_id}"
+        user_external_id = user.whatsapp_id if user else str(user_id)
         
         # Create memory in Mem0
         mem0_id = mem0_client.create_memory(
@@ -194,10 +195,29 @@ class MemoryService:
         user = db.query(User).filter(User.id == user_id).first()
         user_external_id = f"user:wa:{user.whatsapp_id}" if user else f"user:wa:{user_id}"
         
-        # Search in Mem0
+        # Search in Mem0 (with fallback)
         logger.debug("🔍 Searching in Mem0...")
-        mem0_results = mem0_client.search_memories(query, user_external_id, limit)
-        logger.info(f"📊 Found {len(mem0_results)} results in Mem0")
+        try:
+            mem0_results = mem0_client.search_memories(query, user_external_id, limit)
+            logger.info(f"📊 Found {len(mem0_results)} results in Mem0")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to search Mem0: {e}")
+            logger.info("🔍 Falling back to local search...")
+            # Fallback to local search
+            local_memories = db.query(Memory).filter(
+                Memory.user_id == user_id,
+                Memory.content.contains(query)
+            ).order_by(Memory.created_at.desc()).limit(limit).all()
+            
+            mem0_results = []
+            for memory in local_memories:
+                mem0_results.append({
+                    "id": memory.mem0_id,
+                    "content": memory.content,
+                    "type": memory.memory_type,
+                    "metadata": {"user_id": memory.user_id, "interaction_id": memory.interaction_id},
+                    "created_at": memory.created_at.isoformat()
+                })
         
         # Enrich with local database data
         logger.debug("🔍 Enriching with local database data...")
@@ -227,8 +247,13 @@ class MemoryService:
         user = db.query(User).filter(User.id == user_id).first()
         user_external_id = f"user:wa:{user.whatsapp_id}" if user else f"user:wa:{user_id}"
         
-        # Get memories from Mem0
-        mem0_memories = mem0_client.list_memories(user_external_id, limit)
+        # Get memories from Mem0 (with fallback)
+        try:
+            mem0_memories = mem0_client.list_memories(user_external_id, limit)
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to list Mem0 memories: {e}")
+            logger.info("🔍 Falling back to local memories only...")
+            mem0_memories = []
         
         # Get local memories
         local_memories = db.query(Memory).filter(
@@ -253,6 +278,135 @@ class MemoryService:
         return memories
 
 
+class ReminderService:
+    @staticmethod
+    def create_reminder(
+        db: Session,
+        user_id: int,
+        interaction_id: int,
+        message: str,
+        scheduled_time: datetime,
+        user_timezone: str = "UTC",
+        reminder_type: str = "message",
+        recurrence_pattern: Optional[Dict[str, Any]] = None
+    ) -> Reminder:
+        """Create a new reminder"""
+        logger.info(f"⏰ Creating reminder for user {user_id}, scheduled for {scheduled_time}")
+        logger.debug(f"🕐 Scheduled time (original): {scheduled_time}")
+        logger.debug(f"🕐 Timezone: {user_timezone}")
+        
+        # Use local machine timezone
+        from datetime import timezone
+        local_tz = datetime.now().astimezone().tzinfo
+        
+        # Make the datetime timezone-aware if it isn't already
+        if scheduled_time.tzinfo is None:
+            scheduled_time = scheduled_time.replace(tzinfo=local_tz)
+        
+        logger.debug(f"🕐 Scheduled time (local): {scheduled_time}")
+        logger.debug(f"🕐 Current time (local): {datetime.now().astimezone()}")
+        
+        reminder = Reminder(
+            user_id=user_id,
+            interaction_id=interaction_id,
+            message=message,
+            scheduled_time=scheduled_time,
+            timezone=user_timezone,
+            reminder_type=reminder_type,
+            recurrence_pattern=recurrence_pattern or {},
+            status="pending"
+        )
+        
+        db.add(reminder)
+        db.commit()
+        db.refresh(reminder)
+        logger.info(f"✅ Created reminder ID: {reminder.id}")
+        return reminder
+    
+    @staticmethod
+    def get_pending_reminders(db: Session, limit: int = 100) -> List[Reminder]:
+        """Get all pending reminders that are due to be sent"""
+        logger.debug(f"🔍 Getting pending reminders, limit: {limit}")
+        
+        # Use local machine timezone
+        now = datetime.now().astimezone()  # Use local timezone for comparison
+        logger.debug(f"🕐 Current local time: {now}")
+        
+        reminders = db.query(Reminder).filter(
+            Reminder.status == "pending",
+            Reminder.scheduled_time <= now
+        ).limit(limit).all()
+        
+        # Log the scheduled times for debugging
+        for reminder in reminders:
+            logger.debug(f"⏰ Reminder {reminder.id}: scheduled for {reminder.scheduled_time}, status: {reminder.status}")
+        
+        logger.info(f"📊 Found {len(reminders)} pending reminders")
+        return reminders
+    
+    @staticmethod
+    def get_user_reminders(db: Session, user_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get all reminders for a user"""
+        logger.debug(f"🔍 Getting reminders for user {user_id}, limit: {limit}")
+        
+        reminders = db.query(Reminder).filter(
+            Reminder.user_id == user_id
+        ).order_by(Reminder.scheduled_time.desc()).limit(limit).all()
+        
+        logger.info(f"📊 Found {len(reminders)} reminders for user")
+        
+        return [
+            {
+                "id": reminder.id,
+                "message": reminder.message,
+                "scheduled_time": reminder.scheduled_time.isoformat(),
+                "timezone": reminder.timezone,
+                "status": reminder.status,
+                "reminder_type": reminder.reminder_type,
+                "created_at": reminder.created_at.isoformat(),
+                "sent_at": reminder.sent_at.isoformat() if reminder.sent_at else None,
+                "user_id": reminder.user_id,
+                "interaction_id": reminder.interaction_id
+            }
+            for reminder in reminders
+        ]
+    
+    @staticmethod
+    def mark_reminder_sent(db: Session, reminder_id: int) -> bool:
+        """Mark a reminder as sent"""
+        logger.debug(f"✅ Marking reminder {reminder_id} as sent")
+        
+        reminder = db.query(Reminder).filter(Reminder.id == reminder_id).first()
+        if reminder:
+            reminder.status = "sent"
+            reminder.sent_at = datetime.now().astimezone()
+            db.commit()
+            logger.info(f"✅ Marked reminder {reminder_id} as sent")
+            return True
+        else:
+            logger.warning(f"⚠️ Reminder {reminder_id} not found")
+            return False
+    
+    @staticmethod
+    def cancel_reminder(db: Session, reminder_id: int, user_id: int) -> bool:
+        """Cancel a reminder"""
+        logger.debug(f"❌ Cancelling reminder {reminder_id} for user {user_id}")
+        
+        reminder = db.query(Reminder).filter(
+            Reminder.id == reminder_id,
+            Reminder.user_id == user_id
+        ).first()
+        
+        if reminder and reminder.status == "pending":
+            reminder.status = "cancelled"
+            db.commit()
+            logger.info(f"✅ Cancelled reminder {reminder_id}")
+            return True
+        else:
+            logger.warning(f"⚠️ Reminder {reminder_id} not found or already processed")
+            return False
+
+
 class AnalyticsService:
     @staticmethod
     def get_analytics_summary(db: Session, user_id: int) -> Dict[str, Any]:
@@ -260,12 +414,12 @@ class AnalyticsService:
         logger.debug(f"📊 Generating analytics summary for user {user_id}")
         
         # Total memories by type
-        memory_types = db.query(Memory.memory_type, db.func.count(Memory.id)).filter(
+        memory_types = db.query(Memory.memory_type, func.count(Memory.id)).filter(
             Memory.user_id == user_id
         ).group_by(Memory.memory_type).all()
         
         # Total interactions by type
-        interaction_types = db.query(Interaction.interaction_type, db.func.count(Interaction.id)).filter(
+        interaction_types = db.query(Interaction.interaction_type, func.count(Interaction.id)).filter(
             Interaction.user_id == user_id
         ).group_by(Interaction.interaction_type).all()
         
@@ -291,14 +445,26 @@ class AnalyticsService:
         
         top_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)[:5]
         
+        # Reminder statistics
+        total_reminders = db.query(func.count(Reminder.id)).filter(
+            Reminder.user_id == user_id
+        ).scalar()
+        
+        pending_reminders = db.query(func.count(Reminder.id)).filter(
+            Reminder.user_id == user_id,
+            Reminder.status == "pending"
+        ).scalar()
+        
         analytics = {
             "memory_types": dict(memory_types),
             "interaction_types": dict(interaction_types),
             "last_ingest_time": last_interaction.created_at.isoformat() if last_interaction else None,
             "top_tags": dict(top_tags),
             "total_memories": sum(count for _, count in memory_types),
-            "total_interactions": sum(count for _, count in interaction_types)
+            "total_interactions": sum(count for _, count in interaction_types),
+            "total_reminders": total_reminders,
+            "pending_reminders": pending_reminders
         }
         
-        logger.info(f"📊 Analytics summary: {analytics['total_memories']} memories, {analytics['total_interactions']} interactions")
+        logger.info(f"📊 Analytics summary: {analytics['total_memories']} memories, {analytics['total_interactions']} interactions, {analytics['total_reminders']} reminders")
         return analytics

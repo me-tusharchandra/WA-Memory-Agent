@@ -10,6 +10,7 @@ A WhatsApp chatbot using Twilio's WhatsApp API and Mem0's memory layer to ingest
 - **Interactive Chat**: Handle conversational queries using context awareness
 - **Semantic Search**: AI-powered intent classification for natural language queries
 - **Memory Listing**: `/list` command to enumerate all user memories
+- **Scheduled Reminders**: Set reminders with natural language time expressions
 - **Analytics**: Database-backed queries and analytics summary
 - **Timezone-aware**: Support for timezone-aware queries and filtering
 
@@ -23,6 +24,7 @@ The application uses a custom database schema with the following entities:
 - **Interactions**: Inbound messages (text, image, audio) with metadata
 - **Media**: Media files with content-based deduplication
 - **Memories**: Links to Mem0 memories with local metadata
+- **Reminders**: Scheduled reminders with timing information
 
 ### Key Features
 
@@ -30,25 +32,47 @@ The application uses a custom database schema with the following entities:
 - **Media Deduplication**: Identical media stored once and re-referenced
 - **Memory Linkage**: Each memory traceable to its originating interaction
 - **Timezone Support**: Queries support user timezone context
-- **AI Intent Classification**: Uses OpenAI to distinguish between new memories and search queries
+- **AI Intent Classification**: Uses OpenAI to distinguish between new memories, search queries, and reminder requests
+- **Scheduled Reminders**: Background scheduler sends reminders at specified times
 
-### Semantic Search
+### Semantic Search & Intent Classification
 
 The application uses AI-powered intent classification to automatically determine whether a message is:
 - **New Memory**: Information to be stored (e.g., "I got a haircut today", "Meeting with John at 3pm")
 - **Search Query**: Request for previously stored information (e.g., "What did I plan for dinner?", "Show me my recent photos")
+- **Reminder Request**: Request to be reminded at a specific time (e.g., "Remind me to call mom tomorrow at 3pm")
 
 **How it works:**
-1. Every text message is analyzed using OpenAI's GPT-3.5-turbo
+1. Every text message is analyzed using OpenAI's GPT-4
 2. The AI classifies the intent with confidence scores
 3. Search queries trigger semantic search in Mem0
 4. New memories are stored for future retrieval
+5. Reminder requests are scheduled for future delivery
 
 **Example interactions:**
 - User: "I bought groceries: milk, bread, eggs" → Saved as memory
 - User: "What did I buy at the store?" → Searches for grocery-related memories
 - User: "Meeting with Sarah tomorrow" → Saved as memory  
 - User: "When is my meeting with Sarah?" → Searches for meeting-related memories
+- User: "Remind me to call mom tomorrow at 3pm" → Scheduled reminder
+- User: "Set a reminder for my meeting at 2pm" → Scheduled reminder
+
+### Scheduled Reminders
+
+The application includes a sophisticated reminder system that:
+
+- **Natural Language Processing**: Understands time expressions like "tomorrow at 3pm", "in 2 hours", "next Monday"
+- **Background Scheduling**: Automatically checks for due reminders every minute
+- **WhatsApp Delivery**: Sends reminder messages directly to users via WhatsApp
+- **Timezone Support**: Handles different timezones correctly
+- **Status Tracking**: Tracks reminder status (pending, sent, cancelled)
+
+**Example reminder requests:**
+- "Remind me to call mom tomorrow at 3pm"
+- "Set a reminder for my meeting at 2pm"
+- "Remind me to buy groceries in 2 hours"
+- "Alert me to take medicine at 9am"
+- "Remind me about the dentist appointment next Monday"
 
 ## Setup Instructions
 
@@ -57,7 +81,7 @@ The application uses AI-powered intent classification to automatically determine
 - Python 3.8+
 - Twilio Account with WhatsApp Sandbox
 - Mem0 API Key
-- OpenAI API Key (for Whisper transcription)
+- OpenAI API Key (for Whisper transcription and intent classification)
 
 ### Installation
 
@@ -89,7 +113,7 @@ The application uses AI-powered intent classification to automatically determine
    MEM0_ORG_ID=your_org_id  # Optional
    MEM0_PROJECT_ID=your_project_id  # Optional
    
-   # OpenAI Configuration (for Whisper transcription)
+   # OpenAI Configuration (for Whisper transcription and intent classification)
    OPENAI_API_KEY=your_openai_api_key
    ```
 
@@ -122,6 +146,12 @@ The application uses AI-powered intent classification to automatically determine
 - `GET /memories?query=<text>` - Search memories
 - `GET /memories/list` - List all memories
 
+### Reminder Management
+- `POST /reminders` - Create a new reminder
+- `GET /reminders` - List all reminders
+- `DELETE /reminders/{reminder_id}` - Cancel a reminder
+- `POST /reminders/{reminder_id}/send-now` - Send reminder immediately (for testing)
+
 ### Analytics
 - `GET /interactions/recent?limit=<n>` - Get recent interactions
 - `GET /analytics/summary` - Get analytics summary
@@ -136,6 +166,7 @@ The application uses AI-powered intent classification to automatically determine
 1. **Send a text message**: 
    - New memories: "I got a haircut today", "Meeting with John at 3pm"
    - Search queries: "What did I plan for dinner?", "Show me my recent photos"
+   - Reminder requests: "Remind me to call mom tomorrow at 3pm"
 2. **Send an image**: Images are processed and saved with metadata
 3. **Send a voice note**: Audio is transcribed and saved as text memory
 4. **List memories**: `/list` - Shows your recent memories
@@ -156,6 +187,17 @@ curl -X POST "http://localhost:8000/memories" \
 **Search memories:**
 ```bash
 curl "http://localhost:8000/memories?query=grocery&limit=5"
+```
+
+**Create a reminder:**
+```bash
+curl -X POST "http://localhost:8000/reminders" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Call mom",
+    "scheduled_time": "2025-09-04T15:00:00",
+    "timezone": "UTC"
+  }'
 ```
 
 **Get recent interactions:**
@@ -180,7 +222,7 @@ curl "http://localhost:8000/analytics/summary"
 - `id`: Primary key
 - `twilio_message_sid`: Unique Twilio message ID (for idempotency)
 - `user_id`: Foreign key to users
-- `interaction_type`: Type of interaction (text, image, audio, command)
+- `interaction_type`: Type of interaction (text, image, audio, command, reminder)
 - `content`: Message content
 - `media_id`: Foreign key to media (if applicable)
 - `transcript`: Audio transcript (for voice notes)
@@ -207,11 +249,27 @@ curl "http://localhost:8000/analytics/summary"
 - `tags`: JSON array of tags
 - `created_at`: Memory creation timestamp
 
+### Reminders Table
+- `id`: Primary key
+- `user_id`: Foreign key to users
+- `interaction_id`: Foreign key to interactions
+- `message`: Reminder message
+- `scheduled_time`: When to send the reminder
+- `timezone`: Timezone for the reminder
+- `status`: Reminder status (pending, sent, cancelled)
+- `reminder_type`: Type of reminder (message, recurring)
+- `recurrence_pattern`: JSON pattern for recurring reminders
+- `created_at`: Reminder creation timestamp
+- `sent_at`: When the reminder was sent
+
 ## Development
 
 ### Running Tests
 ```bash
-# Add tests to the project
+# Test reminder functionality
+python test_reminders.py
+
+# Add more tests to the project
 pytest
 ```
 
@@ -290,7 +348,12 @@ CMD ["python", "main.py"]
    - Ensure `OPENAI_API_KEY` is set
    - Check OpenAI API quota
 
-4. **Database errors**
+4. **Reminders not being sent**
+   - Check if reminder scheduler is running
+   - Verify Twilio credentials are correct
+   - Check database for pending reminders
+
+5. **Database errors**
    - Verify database URL is correct
    - Check database permissions
 
